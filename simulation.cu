@@ -7,19 +7,22 @@
 
 
 // Agents
-#define NUM_AGENTS 1000
+#define NUM_AGENTS 500000
 #define SPEED 1.5f
+#define SENSE_DIST 4.0f
+#define SENSE_RAD 2
+#define SENSE_TURN (2 * PI * (1/12.0f))
 
 // Trails
 #define DIFFUSE_RAD 1
-#define DECAY 0.7f
+#define DECAY 0.6f
 #define FLUX 0.2f
 
 
 struct Agent {
     float x, y;
     float angle;
-    uint32_t state;
+    uint32_t rand;
 };
 
 
@@ -48,8 +51,7 @@ __device__ int rgbToInt(float r, float g, float b)
     return (int(b)<<16) | (int(g)<<8) | int(r);
 }
 
-inline __device__
-uint32_t step_state(uint32_t state)
+inline __device__ uint32_t step_rand(uint32_t state)
 {
     state ^= 2747636419u;
     state *= 2654435769u;
@@ -75,10 +77,12 @@ __host__ void CUDAinit(unsigned int** texture, int imgw, int imgh, int ubyte_siz
     Agent h_agents[NUM_AGENTS];
     srand(6);
     for (int i = 0; i < NUM_AGENTS; ++i) {
-	h_agents[i].x = rand() % imgw;
-	h_agents[i].y = rand() % imgh;
-	h_agents[i].state = rand();
-	h_agents[i].angle = ((float)h_agents[i].state) / RAND_MAX * PI * 2;
+	float r = imgh * 0.4f * rand() / (float)RAND_MAX;
+	float theta = 2 * PI * rand() / (float)RAND_MAX;
+	h_agents[i].x = imgw / 2 + (int)(r * sin(theta));
+	h_agents[i].y = imgh / 2 + (int)(r * cos(theta));
+	h_agents[i].rand = rand();
+	h_agents[i].angle = theta + PI;
     }
     checkCudaErrors(cudaMalloc(&d_agents, NUM_AGENTS * sizeof(Agent)));
     checkCudaErrors(cudaMalloc(&d_trails_back, imgw * imgh * sizeof(float)));
@@ -91,24 +95,48 @@ __host__ void CUDAinit(unsigned int** texture, int imgw, int imgh, int ubyte_siz
 // ------------------------------ KERNELS ------------------------------ //
 
 
+inline __device__ float sense(float* trails, Agent agent, float angle, int imgw, int imgh) {
+    float sense_angle = agent.angle + angle;
+    int sense_x = (int) (agent.x + SENSE_DIST * sin(sense_angle));
+    int sense_y = (int) (agent.y + SENSE_DIST * cos(sense_angle));
+    float sum = 0.0f;
+    for (int dy = -SENSE_RAD; dy < SENSE_RAD; ++dy) {
+	for (int dx = -SENSE_RAD; dx < SENSE_RAD; ++dx) {
+	    int x = clamp(sense_x + dx, 0, imgw);
+	    int y = clamp(sense_y + dy, 0, imgh); // TODO: conditional add iff in bounds?
+	    sum += trails[y * imgw + x];
+	}
+    }
+    return sum;
+}
+
+
 __global__ void
-moveAgents(Agent* agents, float *trails, float imgw, float imgh)
+moveAgents(Agent* agents, float *itrails, float *otrails, int imgw, int imgh)
 {
     int i = blockDim.x * blockIdx.x + threadIdx.x;
     if (i >= NUM_AGENTS) return;
 
     Agent agent = agents[i];
+    agent.rand = step_rand(agent.rand);
+
+    float left = sense(itrails, agent, -SENSE_TURN, imgw, imgh);
+    float fwd = sense(itrails, agent, 0, imgw, imgh);
+    float right = sense(itrails, agent, SENSE_TURN, imgw, imgh);
+
+    agent.angle += ((left > fwd && left > right) * -SENSE_TURN / 4 +
+		    (right > fwd)                *  SENSE_TURN / 4 );//+
+    //(right < fwd && left < fwd)  *  steer_strength);
 
     agent.x += sin(agent.angle) * SPEED;
     agent.y += cos(agent.angle) * SPEED;
     if (agent.x < 0 || agent.x >= imgw || agent.y < 0 || agent.y >= imgh) {
-	agent.state = step_state(agent.state);
-	agent.angle = agent.state / 1000.0f;
-	agent.x = clamp(agent.x, 0.0f, imgw-1);
-	agent.y = clamp(agent.y, 0.0f, imgh-1);
+	agent.angle = agent.rand / 1000.0f;
+	agent.x = clamp(agent.x, 0.0f, (float)imgw-1);
+	agent.y = clamp(agent.y, 0.0f, (float) imgh-1);
     }
     
-    trails[((int) agent.y) * (int)imgw + ((int) agent.x)] = 255.0f;
+    otrails[((int) agent.y) * imgw + ((int) agent.x)] = 255.0f;
     agents[i] = agent;
 }
 
@@ -123,7 +151,7 @@ diffuse(float* trails_front, float* trails_back, unsigned int *g_odata, int imgw
     if (x >= imgw || y >= imgh) return;
 
     float val = trails_front[y * imgw + x];
-    g_odata[y*imgw+x] = rgbToInt(val, val, val);
+    g_odata[y*imgw+x] = rgbToInt(1-val, val*0.6, val*0.6);
     
     float sum = 0;
     for (int dy = -DIFFUSE_RAD; dy < DIFFUSE_RAD; ++dy) {
@@ -146,7 +174,7 @@ step_simulation(unsigned int *odata, int imgw, int imgh)
 
     int block_size = 32;
     int num_blocks = (NUM_AGENTS + block_size - 1) / block_size;
-    moveAgents<<<num_blocks, block_size>>>(d_agents, d_trails_front, imgw, imgh);
+    moveAgents<<<num_blocks, block_size>>>(d_agents, d_trails_back, d_trails_front, imgw, imgh);
 
     
     dim3 block_dim(block_size, block_size);

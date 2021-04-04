@@ -13,8 +13,8 @@
 extern "C" void step_simulation(unsigned int *g_odata, int imgw, int imgh);
 extern "C" void CUDAinit(unsigned int** texture, int imgw, int imgh, int ubyte_size);
 
-unsigned int image_width = 3440;
-unsigned int image_height = 1440;
+unsigned int image_width = 1920;
+unsigned int image_height = 1080;
 unsigned int window_width = image_width;
 unsigned int window_height = image_height;
 int iGLUTWindowHandle = 0;          // handle to the GLUT window
