@@ -8,15 +8,17 @@
 
 // Agents
 #define NUM_AGENTS 500000
-#define SPEED 1.5f
+#define SPEED 1.0f
 #define SENSE_DIST 4.0f
 #define SENSE_RAD 2
-#define SENSE_TURN (2 * PI * (1/12.0f))
+#define SENSE_ANGLE (2 * PI * (1/12.0f))
+#define TURN_ANGLE (SENSE_ANGLE / 4.0f)
 
 // Trails
 #define DIFFUSE_RAD 1
-#define DECAY 0.6f
-#define FLUX 0.2f
+#define DIFFUSE_AREA ((2*DIFFUSE_RAD+1) * (2*DIFFUSE_RAD+1))
+#define DECAY 0.95f
+#define FLUX 0.5f
 
 
 struct Agent {
@@ -77,10 +79,12 @@ __host__ void CUDAinit(unsigned int** texture, int imgw, int imgh, int ubyte_siz
     Agent h_agents[NUM_AGENTS];
     srand(6);
     for (int i = 0; i < NUM_AGENTS; ++i) {
-	float r = imgh * 0.4f * rand() / (float)RAND_MAX;
+	// float r = imgh * 0.4f * rand() / (float)RAND_MAX;
 	float theta = 2 * PI * rand() / (float)RAND_MAX;
-	h_agents[i].x = imgw / 2 + (int)(r * sin(theta));
-	h_agents[i].y = imgh / 2 + (int)(r * cos(theta));
+	// h_agents[i].x = imgw / 2 + (int)(r * sin(theta));
+	// h_agents[i].y = imgh / 2 + (int)(r * cos(theta));
+	h_agents[i].x = rand() % imgw;
+	h_agents[i].y = rand() % imgh;
 	h_agents[i].rand = rand();
 	h_agents[i].angle = theta + PI;
     }
@@ -120,21 +124,20 @@ moveAgents(Agent* agents, float *itrails, float *otrails, int imgw, int imgh)
     Agent agent = agents[i];
     agent.rand = step_rand(agent.rand);
 
-    float left = sense(itrails, agent, -SENSE_TURN, imgw, imgh);
+    float left = sense(itrails, agent, -SENSE_ANGLE, imgw, imgh);
     float fwd = sense(itrails, agent, 0, imgw, imgh);
-    float right = sense(itrails, agent, SENSE_TURN, imgw, imgh);
+    float right = sense(itrails, agent, SENSE_ANGLE, imgw, imgh);
 
-    agent.angle += ((left > fwd && left > right) * -SENSE_TURN / 4 +
-		    (right > fwd)                *  SENSE_TURN / 4 );//+
-    //(right < fwd && left < fwd)  *  steer_strength);
+    agent.angle += ((left > fwd && right > fwd)  * TURN_ANGLE * ((agent.rand & 2) - 1.0f) + 
+		    (left > fwd)  * -TURN_ANGLE +
+		    (right > fwd) *  TURN_ANGLE);
+    
 
     agent.x += sin(agent.angle) * SPEED;
     agent.y += cos(agent.angle) * SPEED;
-    if (agent.x < 0 || agent.x >= imgw || agent.y < 0 || agent.y >= imgh) {
-	agent.angle = agent.rand / 1000.0f;
-	agent.x = clamp(agent.x, 0.0f, (float)imgw-1);
-	agent.y = clamp(agent.y, 0.0f, (float) imgh-1);
-    }
+
+    agent.x += imgw * ((agent.x < 0) - (agent.x >= imgw));
+    agent.y += imgh * ((agent.y < 0) - (agent.y >= imgh));
     
     otrails[((int) agent.y) * imgw + ((int) agent.x)] = 255.0f;
     agents[i] = agent;
@@ -154,14 +157,14 @@ diffuse(float* trails_front, float* trails_back, unsigned int *g_odata, int imgw
     g_odata[y*imgw+x] = rgbToInt(1-val, val*0.6, val*0.6);
     
     float sum = 0;
-    for (int dy = -DIFFUSE_RAD; dy < DIFFUSE_RAD; ++dy) {
-	for (int dx = -DIFFUSE_RAD; dx < DIFFUSE_RAD; ++dx) {
+    for (int dy = -DIFFUSE_RAD; dy <= DIFFUSE_RAD; ++dy) {
+	for (int dx = -DIFFUSE_RAD; dx <= DIFFUSE_RAD; ++dx) {
 	    int sample_y = clamp(y+dy, 0, imgh);
 	    int sample_x = clamp(x+dx, 0, imgw);
 	    sum += trails_front[sample_y * imgw + sample_x];
 	}
     }
-    sum /= 2; //DIFFUSE_AREA;
+    sum /= DIFFUSE_AREA;
     
     trails_back[y*imgw+x] = FLUX * sum + (1-FLUX) * val * DECAY;
 }
